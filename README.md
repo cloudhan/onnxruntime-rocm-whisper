@@ -37,4 +37,5 @@ python inference.py \
 
 # You should see the decoded sequence with ort: Mr. Quilter is the apostle of the middle classes and we are glad to welcome his gospel.
 # You can tweak BEAM_SIZES and BATCH_SIZES in inference.py
+# Modify inference.py for warmup_run = True. If you profile it, the result will be skewed due to online tuning
 ```
