@@ -381,7 +381,19 @@ def get_ort_model(args):
     if args.verbose:
         sess_options.log_verbosity_level = 3
         sess_options.log_severity_level = 1
-    sess = ort.InferenceSession(args.ort_model_path, sess_options, providers=[args.execution_provider])
+
+    provider_options = {}
+    if args.execution_provider in ("CUDAExecutionProvider", "ROCMExecutionProvider"):
+        provider_options["device_id"] = args.device_id
+    if args.tuning:
+        provider_options["tunable_op_enable"] = 1
+        provider_options["tunable_op_tuning_enable"] = 1
+        provider_options["tunable_op_max_tuning_duration_ms"] = 500
+
+    sess = ort.InferenceSession(
+        args.ort_model_path, sess_options, providers=[(args.execution_provider, provider_options)]
+    )
+
     return sess
 
 
@@ -675,6 +687,33 @@ def parse_args():
         help="Whether to print information (e.g. outputs, verifications)",
     )
 
+    # Args for offline tuning
+    parser.add_argument(
+        "-t",
+        "--tuning",
+        action="store_true",
+        help="Enable TunableOp and tuning. "
+        "This will incur longer warmup latency, and is mandatory for some operators of ROCm EP.",
+    )
+
+    parser.add_argument(
+        "-tl",
+        "--tuning_results_load_path",
+        required=False,
+        default=None,
+        type=str,
+        help="Load tuning results from the path for the InferenceSessions.",
+    )
+
+    parser.add_argument(
+        "-ts",
+        "--tuning_results_save_path",
+        required=False,
+        default=None,
+        type=str,
+        help="Merge and save tuning results to the path from the InferenceSessions.",
+    )
+
     args = parser.parse_args()
 
     # Set seed properties
@@ -684,8 +723,6 @@ def parse_args():
     # Set runtime properties
     if "ORT" in args.benchmark_type:
         setattr(args, "execution_provider", f"{args.device.upper()}ExecutionProvider")
-        if args.execution_provider == "CUDAExecutionProvider":
-            args.execution_provider = (args.execution_provider, {"device_id": args.device_id})
 
     if args.benchmark_type == "ORT":
         args.hf_api = None
@@ -701,12 +738,110 @@ def parse_args():
     return args
 
 
+def recursive_visit(obj, func, visited=None):
+    def recursive_visit_impl(visited, obj, func):
+        if id(obj) in visited:
+            return
+
+        visited.add(id(obj))
+        func(obj)
+
+        if isinstance(obj, (int, float, bool, str, bytes)) or obj is None:
+            return
+
+        if isinstance(obj, (list, tuple, set)):
+            for v in obj:
+                func(v)
+                recursive_visit_impl(visited, v, func)
+            return
+
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                func(k)
+                func(v)
+                recursive_visit_impl(visited, k, func)
+                recursive_visit_impl(visited, v, func)
+            return
+
+        if getattr(obj, "__dict__", None) is not None:
+            for k, v in vars(obj).items():
+                func(k)
+                func(v)
+                recursive_visit_impl(visited, k, func)
+                recursive_visit_impl(visited, v, func)
+            return
+
+        if getattr(obj, "__iter__", None) is not None:
+            for v in obj:
+                func(v)
+                recursive_visit_impl(visited, v, func)
+            return
+
+        print("    >>>> recursive_visit cannot process", type(obj))
+
+    if visited is None:
+        visited = set()
+    visited.add(id(visited))
+    visited.add(id(func))
+    recursive_visit_impl(visited, obj, func)
+
+
+def get_all_inference_sessions(args, model, pipeline):
+    sessions = {}
+    if tuning_results_load_path or tuning_results_save_path:
+
+        def get_all_sessions(obj):
+            if isinstance(obj, onnxruntime.InferenceSession):
+                sessions[id(obj)] = obj
+
+        recursive_visit(model, get_all_sessions)
+        recursive_visit(pipeline, get_all_sessions)
+
+    return list(sessions.values())
+
+
+def load_tuning_results(args, sessions):
+    if args.tuning_results_load_path is None or len(sessions) == 0:
+        return
+
+    if os.path.exists(args.tuning_results_load_path):
+        print(f"ERROR: Cannot find tuning results {args.tuning_results_load_path}")
+        return
+
+    trs = json.load(open(args.tuning_results_load_path))
+    for sess in sessions:
+        sess.set_tuning_results(trs)
+
+
+def save_tuning_results(args, sessions):
+    if args.tuning_results_load_path is None or len(sessions) == 0:
+        return
+
+    from onnxruntime.tools import offline_tuning
+
+    m = offline_tuning.Merger()
+    for sess in sessions:
+        m.merge(sess.get_tuning_results())
+    trs = m.get_merged()
+    json.dump(trs, open(args.tuning_results_save_path, "w"))
+
+
 def main():
     args = parse_args()
     print(args.__dict__)
+    if args.tuning:
+        # NOTE: hf pipeline, these envvars are for developers only, and should not be used in production env
+        os.environ["ORT_CUDA_TUNABLE_OP_ENABLE"] = "1"
+        os.environ["ORT_CUDA_TUNABLE_OP_TUNING_ENABLE"] = "1"
+        os.environ["ORT_ROCM_TUNABLE_OP_ENABLE"] = "1"
+        os.environ["ORT_ROCM_TUNABLE_OP_TUNING_ENABLE"] = "1"
+
     torch.backends.cudnn.benchmark = True
     inputs, processor, model, pipeline = get_vars(args)
+    sessions = get_all_inference_sessions(args, model, pipeline)
+    load_tuning_results(args, sessions)
     run_inference(args, inputs, processor, model, pipeline)
+    save_tuning_results(args, sessions)
 
 
 if __name__ == "__main__":
