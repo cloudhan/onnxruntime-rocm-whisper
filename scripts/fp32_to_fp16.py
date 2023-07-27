@@ -7,6 +7,7 @@
 import argparse
 import os
 import shutil
+import copy
 
 from onnxruntime.transformers.optimizer import optimize_model
 from onnxruntime.transformers.fusion_options import FusionOptions
@@ -48,7 +49,7 @@ def parse_args():
         help="Optimize for GPU",
     )
     parser.set_defaults(gpu=False)
-    
+
     args = parser.parse_args()
     return args
 
@@ -57,19 +58,24 @@ def main():
     args = parse_args()
     _, num_heads, hidden_size = MODEL_SIZE_INFO[args.size]
     optimization_options = FusionOptions("bart")
-    use_external_data_format = args.size in {"small", "medium", "large"}
+    optimization_options.disable_multi_head_attention_bias = True
 
-    fp16 = os.path.join(args.folder, "fp16")
-    os.makedirs(fp16, exist_ok=True)
-    fp32 = os.path.join(args.folder, "fp32")
-    os.makedirs(fp32, exist_ok=True)
+    use_external_data_format = args.size in {"tiny", "small", "medium", "large"}
+
+    fp16_dir = os.path.join(args.folder, "fp16")
+    fp32_dir = os.path.join(args.folder, "fp32")
+    os.makedirs(fp16_dir, exist_ok=True)
+    os.makedirs(fp32_dir, exist_ok=True)
 
     # Generate FP16 and FP32 files
     files = os.listdir(args.folder)
     for fle in files:
-        if ".onnx" in fle:
+        if fle.endswith(".onnx"):
+            print("Processing", fle)
+            if fle.endswith("_fp32.onnx") or fle.endswith("_fp16.onnx"):
+                print("Skipped")
+                continue
             file_path = os.path.join(args.folder, fle)
-            
             optimization_options.use_multi_head_attention = "encoder" not in file_path
             m = optimize_model(
                 file_path,
@@ -80,36 +86,31 @@ def main():
                 optimization_options=optimization_options,
                 use_gpu=args.gpu,
             )
-            
-            fp32_dest = file_path.replace(".onnx", "_fp32.onnx")
-            m.save_model_to_file(fp32_dest, use_external_data_format)
+
+            copy.deepcopy(m).save_model_to_file(os.path.join(fp32_dir, fle), use_external_data_format)
 
             # m.convert_float_to_float16()
-            m.convert_model_float32_to_float16(cast_input_output=False)
+            m.convert_float_to_float16(cast_input_output=False)
+            m.save_model_to_file(os.path.join(fp16_dir, fle), use_external_data_format)
 
-            fp16_dest = file_path.replace(".onnx", "_fp16.onnx")
-            m.save_model_to_file(fp16_dest, use_external_data_format)
-            
             os.remove(file_path)
+            print("Done")
 
     # Move files into FP16 and FP32 folders
     files = os.listdir(args.folder)
     for fle in files:
         file_path = os.path.join(args.folder, fle)
-        fp16_path = os.path.join(args.folder, "fp16", fle.replace("_fp16.onnx", ".onnx"))
-        fp32_path = os.path.join(args.folder, "fp32", fle.replace("_fp32.onnx", ".onnx"))
 
-        if not os.path.isfile(file_path):
+        if not os.path.isfile(file_path) or fle.endswith(".onnx"):
             continue
 
-        if "fp16" in fle:
-            os.rename(file_path, fp16_path)
-        elif "fp32" in fle:
-            os.rename(file_path, fp32_path)
-        else:
-            shutil.copyfile(file_path, fp16_path)
-            shutil.copyfile(file_path, fp32_path)
+        if fle.endswith(".onnx_data"):
             os.remove(file_path)
+            continue
+
+        shutil.copy2(file_path, fp32_dir)
+        shutil.copy2(file_path, fp16_dir)
+        os.remove(file_path)
 
 
 if __name__ == '__main__':

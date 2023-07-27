@@ -2,3 +2,5 @@ openai-whisper==20230314
 optimum==1.9.1
 onnxruntime_extensions==0.8.0
 ffmpeg-python==0.2.0
+doit
+onnx==1.13.1  # otherwise, exporting error HF+ORT

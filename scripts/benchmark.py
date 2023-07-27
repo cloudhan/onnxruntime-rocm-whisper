@@ -7,6 +7,7 @@
 import argparse
 import datetime
 import gc
+import json
 import librosa
 import numpy as np
 import os
@@ -318,12 +319,13 @@ def get_hf_ort(args):
     processor = AutoProcessor.from_pretrained(args.model_name)
     torch_dtype = PRECISION[args.precision][0]
     target_device = f"{args.device}:{args.device_id}" if args.device == "cuda" else args.device
+    use_io_binding = args.device == "cuda"
 
     if args.hf_ort_model_path == "":
         model = ORTModelForSpeechSeq2Seq.from_pretrained(
             args.model_name,
             from_transformers=True,
-            use_io_binding=(args.device == "cuda"),
+            use_io_binding=use_io_binding,
         ).to(target_device)
 
         if args.precision == "fp16":
@@ -349,7 +351,7 @@ def get_hf_ort(args):
             # Reload fused FP16 model
             model = ORTModelForSpeechSeq2Seq.from_pretrained(
                 os.path.join(args.hf_ort_model_path, "fp16"),
-                use_io_binding=(args.device == "cuda"),
+                use_io_binding=use_io_binding,
             ).to(target_device)
 
         elif args.precision == "int8":
@@ -359,7 +361,7 @@ def get_hf_ort(args):
         assert os.path.exists(args.hf_ort_model_path)
         model = ORTModelForSpeechSeq2Seq.from_pretrained(
             args.hf_ort_model_path,
-            use_io_binding=(args.device == "cuda"),
+            use_io_binding=use_io_binding,
         ).to(target_device)
 
     pipeline = ort_pipeline(
@@ -432,6 +434,7 @@ def run_hf_pipeline_inference(args, audio, pipe):
         outputs = pipe([audio] * args.batch_size)
 
     if args.verbose:
+        print("=" * 64 + " output " + "=" * 64)
         print(outputs)
 
     # Benchmark
@@ -464,6 +467,7 @@ def run_hf_generate_and_decode_inference(args, inputs, processor, model):
                         predicted_ids[bs * args.num_return_sequences + rs], skip_special_tokens=True
                     )[0]
                 )
+        return transcription
 
     if args.profile:
         with profiler.profile(with_stack=True, profile_memory=True) as prof:
@@ -497,6 +501,7 @@ def run_hf_generate_and_decode_inference(args, inputs, processor, model):
         transcription = gen_and_dec()
 
     if args.verbose:
+        print("=" * 64 + " output " + "=" * 64)
         print(transcription)
 
     # Benchmark
@@ -543,6 +548,7 @@ def run_ort_only_inference(args, inputs, model):
         outputs = model.run(None, inputs)[0]
 
     if args.verbose:
+        print("=" * 64 + " output " + "=" * 64)
         print(outputs)
 
     # Benchmark
@@ -662,7 +668,7 @@ def parse_args():
 
     # Args for running and evaluating the model
     parser.add_argument(
-        "-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", choices=["cpu", "cuda"]
+        "-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", choices=["cpu", "cuda", "rocm"]
     )
     parser.add_argument("-id", "--device-id", type=int, default=0, help="GPU device ID when using CUDA")
     parser.add_argument("-w", "--warmup-runs", type=int, default=5)
@@ -721,8 +727,10 @@ def parse_args():
     torch.manual_seed(args.seed)
 
     # Set runtime properties
-    if "ORT" in args.benchmark_type:
-        setattr(args, "execution_provider", f"{args.device.upper()}ExecutionProvider")
+    setattr(args, "execution_provider", f"{args.device.upper()}ExecutionProvider")
+    if args.device == "rocm":
+        # pytorch expect device to be cuda for both cuda and rocm
+        setattr(args, "device", "cuda")
 
     if args.benchmark_type == "ORT":
         args.hf_api = None
@@ -788,10 +796,10 @@ def recursive_visit(obj, func, visited=None):
 
 def get_all_inference_sessions(args, model, pipeline):
     sessions = {}
-    if tuning_results_load_path or tuning_results_save_path:
+    if args.tuning_results_load_path or args.tuning_results_save_path:
 
         def get_all_sessions(obj):
-            if isinstance(obj, onnxruntime.InferenceSession):
+            if isinstance(obj, ort.InferenceSession):
                 sessions[id(obj)] = obj
 
         recursive_visit(model, get_all_sessions)
@@ -804,7 +812,7 @@ def load_tuning_results(args, sessions):
     if args.tuning_results_load_path is None or len(sessions) == 0:
         return
 
-    if os.path.exists(args.tuning_results_load_path):
+    if not os.path.exists(args.tuning_results_load_path):
         print(f"ERROR: Cannot find tuning results {args.tuning_results_load_path}")
         return
 
