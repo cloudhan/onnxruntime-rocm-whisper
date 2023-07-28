@@ -73,6 +73,7 @@ def get_audio(args, load_with="ffmpeg", features_type=""):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     start_time = time.time()
 
     for _ in trange(args.num_runs):
@@ -80,6 +81,7 @@ def get_audio(args, load_with="ffmpeg", features_type=""):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     end_time = time.time()
 
     print(f"Load audio: {(end_time - start_time) / args.num_runs} s")
@@ -91,6 +93,7 @@ def get_audio(args, load_with="ffmpeg", features_type=""):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     start_time = time.time()
 
     for _ in range(args.num_runs):
@@ -100,6 +103,7 @@ def get_audio(args, load_with="ffmpeg", features_type=""):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     end_time = time.time()
 
     print(f"Feature extraction: {(end_time - start_time) / args.num_runs} s")
@@ -440,6 +444,7 @@ def run_hf_pipeline_inference(args, audio, pipe):
     # Benchmark
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     start_time = time.time()
 
     for _ in trange(args.num_runs):
@@ -447,6 +452,7 @@ def run_hf_pipeline_inference(args, audio, pipe):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     end_time = time.time()
 
     latency = (end_time - start_time) / args.num_runs
@@ -507,6 +513,7 @@ def run_hf_generate_and_decode_inference(args, inputs, processor, model):
     # Benchmark
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     start_time = time.time()
 
     for _ in trange(args.num_runs):
@@ -514,6 +521,7 @@ def run_hf_generate_and_decode_inference(args, inputs, processor, model):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     end_time = time.time()
 
     latency = (end_time - start_time) / args.num_runs
@@ -549,11 +557,14 @@ def run_ort_only_inference(args, inputs, model):
 
     if args.verbose:
         print("=" * 64 + " output " + "=" * 64)
-        print(outputs)
+        tok = AutoProcessor.from_pretrained(f"openai/whisper-{args.model_size}").tokenizer
+        for o in outputs.reshape((-1,) + outputs.shape[-1:]):
+            print(tok.convert_tokens_to_string(tok.convert_ids_to_tokens(o)))
 
     # Benchmark
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     start_time = time.time()
 
     for _ in range(args.num_runs):
@@ -561,6 +572,7 @@ def run_ort_only_inference(args, inputs, model):
 
     if args.device == "cuda":
         torch.cuda.synchronize()
+        print("Device synced at time", time.time())
     end_time = time.time()
 
     latency = (end_time - start_time) / args.num_runs
